@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+
+    services:
+      postgres:
+        image: postgres:16.4
+        env:
+          POSTGRES_DB: wells
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ci -d wells"
+          --health-interval 5s --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r simulator/requirements.txt pytest==8.3.3
+
+      - name: Unit tests
+        run: pytest -q
+
+      - name: Apply schema and seed to a real Postgres
+        env:
+          PGPASSWORD: ci
+        run: |
+          psql -h localhost -U ci -d wells -v ON_ERROR_STOP=1 -f db/init/01_schema.sql
+          psql -h localhost -U ci -d wells -v ON_ERROR_STOP=1 -f db/init/02_seed.sql
+          psql -h localhost -U ci -d wells -v ON_ERROR_STOP=1 -c "ALTER ROLE ingest_writer PASSWORD 'ci'"
+
+      - name: Run the simulator against it (2 hours of backfill, then stop)
+        env:
+          DATABASE_URL: postgresql://ingest_writer:ci@localhost:5432/wells
+        run: |
+          cd simulator
+          timeout 20 python simulate.py --backfill 2 || [ $? -eq 124 ]
+
+      - name: Check the data landed
+        env:
+          PGPASSWORD: ci
+        run: |
+          n=$(psql -h localhost -U ci -d wells -tAc "SELECT count(*) FROM core.readings")
+          echo "valid readings: $n"
+          test "$n" -gt 1000
+
+      - name: Practice answers run without errors
+        env:
+          PGPASSWORD: ci
+        run: psql -h localhost -U ci -d wells -v ON_ERROR_STOP=1 -f sql/practice_answers.sql > /dev/null
+
+  docker-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the simulator image
+        run: docker build -t well-simulator ./simulator

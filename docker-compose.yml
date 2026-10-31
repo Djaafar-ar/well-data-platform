@@ -1,0 +1,53 @@
+name: well-data-platform
+
+services:
+  db:
+    image: postgres:16.4
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: wells
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      INGEST_PASSWORD: ${INGEST_PASSWORD}
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD}
+    volumes:
+      - db-data:/var/lib/postgresql/data          # data survives container restarts
+      - ./db/init:/docker-entrypoint-initdb.d:ro  # schema + seed, run on first start only
+    ports:
+      - "127.0.0.1:5432:5432"                     # reachable from your PC only, not the network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d wells"]
+      interval: 5s
+      retries: 10
+
+  simulator:
+    build: ./simulator
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://ingest_writer:${INGEST_PASSWORD}@db:5432/wells
+      INTERVAL_SECONDS: ${INTERVAL_SECONDS:-10}
+      FAULT_RATE: ${FAULT_RATE:-0.02}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana-oss:11.3.0
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD}
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  db-data:
+  grafana-data:

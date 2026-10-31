@@ -1,0 +1,15 @@
+apiVersion: 1
+
+datasources:
+  - name: wells-db
+    uid: wellsdb
+    type: grafana-postgresql-datasource
+    url: db:5432
+    user: grafana_reader          # read-only role: dashboards can never modify data
+    isDefault: true
+    jsonData:
+      database: wells
+      sslmode: disable            # traffic stays inside the Docker network; enable TLS in milestone 5
+      postgresVersion: 1600
+    secureJsonData:
+      password: $GRAFANA_DB_PASSWORD
