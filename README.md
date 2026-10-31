@@ -1,4 +1,4 @@
-# Well Data Platform
+﻿# Well Data Platform
 
 An end-to-end data and infrastructure platform for oil-well telemetry: SCADA-style data is
 ingested, validated, stored in PostgreSQL, monitored in Grafana, and (in later milestones)
@@ -8,6 +8,8 @@ It is built around one question operations teams ask every day: **can we trust t
 we are looking at, and will we know quickly when something goes wrong?**
 
 > All data here is simulated. Wells, values and limits are fictional.
+
+![Well Overview dashboard](docs/dashboard.png)
 
 ## Architecture
 
