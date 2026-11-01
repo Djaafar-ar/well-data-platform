@@ -1,0 +1,290 @@
+apiVersion: 1
+groups:
+- orgId: 1
+  name: telemetry
+  folder: Wells
+  interval: 1m
+  rules:
+  - uid: telemetry-stale
+    title: Telemetry stale
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: wellsdb
+      model:
+        refId: A
+        editorMode: code
+        format: table
+        rawQuery: true
+        rawSql: SELECT EXTRACT(EPOCH FROM now() - max(time))::float AS age_seconds FROM core.readings
+        intervalMs: 60000
+        maxDataPoints: 43200
+    - refId: B
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: reduce
+        expression: A
+        reducer: last
+        settings:
+          mode: dropNN
+    - refId: C
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 300
+    noDataState: Alerting
+    execErrState: Error
+    for: 1m
+    annotations:
+      summary: No telemetry received for more than 5 minutes
+      description: The newest reading is {{ humanizeDuration .Values.B.Value }} old. RTU, network or simulator down.
+      runbook_url: https://github.com/Djaafar-ar/well-data-platform/blob/main/docs/RUNBOOK.md#telemetry-stale
+    labels:
+      severity: critical
+    isPaused: false
+  - uid: whp-high
+    title: Wellhead pressure high
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: wellsdb
+      model:
+        refId: A
+        editorMode: code
+        format: table
+        rawQuery: true
+        rawSql: 'SELECT well_id, max(value) AS whp_bar FROM core.readings
+
+          WHERE tag = ''WHP'' AND time > now() - interval ''2 minutes''
+
+          GROUP BY well_id'
+        intervalMs: 60000
+        maxDataPoints: 43200
+    - refId: B
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: reduce
+        expression: A
+        reducer: last
+        settings:
+          mode: dropNN
+    - refId: C
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 180
+    noDataState: OK
+    execErrState: Error
+    for: 1m
+    annotations:
+      summary: Wellhead pressure above 180 bar on {{ .Labels.well_id }}
+      description: '{{ .Labels.well_id }}: {{ printf "%.1f" .Values.B.Value }} bar for at least 1 minute (possible pressure build-up or blocked flowline).'
+      runbook_url: https://github.com/Djaafar-ar/well-data-platform/blob/main/docs/RUNBOOK.md#wellhead-pressure-high
+    labels:
+      severity: warning
+    isPaused: false
+  - uid: gas-lift-low
+    title: Gas-lift injection low
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: wellsdb
+      model:
+        refId: A
+        editorMode: code
+        format: table
+        rawQuery: true
+        rawSql: 'SELECT r.well_id, min(r.value) AS gas_lift_sm3d FROM core.readings r
+
+          JOIN core.wells w USING (well_id)
+
+          WHERE r.tag = ''GL_RATE'' AND w.lift_type = ''gas_lift'' AND r.time > now() - interval ''2 minutes''
+
+          GROUP BY r.well_id'
+        intervalMs: 60000
+        maxDataPoints: 43200
+    - refId: B
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: reduce
+        expression: A
+        reducer: last
+        settings:
+          mode: dropNN
+    - refId: C
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: lt
+            params:
+            - 5000
+    noDataState: OK
+    execErrState: Error
+    for: 1m
+    annotations:
+      summary: Gas-lift injection below 5,000 Sm3/d on {{ .Labels.well_id }}
+      description: '{{ .Labels.well_id }}: {{ printf "%.0f" .Values.B.Value }} Sm3/d. Production from this well will drop without lift gas.'
+      runbook_url: https://github.com/Djaafar-ar/well-data-platform/blob/main/docs/RUNBOOK.md#gas-lift-injection-low
+    labels:
+      severity: warning
+    isPaused: false
+- orgId: 1
+  name: data-quality
+  folder: Wells
+  interval: 5m
+  rules:
+  - uid: rejection-rate-high
+    title: Telemetry rejection rate high
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 900
+        to: 0
+      datasourceUid: wellsdb
+      model:
+        refId: A
+        editorMode: code
+        format: table
+        rawQuery: true
+        rawSql: "SELECT COALESCE(100.0 * rej / NULLIF(rej + ok, 0), 0)::float AS rejected_pct\nFROM (SELECT count(*) AS rej FROM raw.rejected WHERE time > now() - interval '15 minutes') a,\n     (SELECT\
+          \ count(*) AS ok  FROM core.readings  WHERE time > now() - interval '15 minutes') b"
+        intervalMs: 60000
+        maxDataPoints: 43200
+    - refId: B
+      relativeTimeRange:
+        from: 900
+        to: 0
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: reduce
+        expression: A
+        reducer: last
+        settings:
+          mode: dropNN
+    - refId: C
+      relativeTimeRange:
+        from: 900
+        to: 0
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 5
+    noDataState: OK
+    execErrState: Error
+    for: 5m
+    annotations:
+      summary: More than 5% of telemetry rejected in the last 15 minutes
+      description: '{{ printf "%.1f" .Values.B.Value }}% of readings failed validation. Check the rejection reasons panel for a faulty sensor.'
+      runbook_url: https://github.com/Djaafar-ar/well-data-platform/blob/main/docs/RUNBOOK.md#telemetry-rejection-rate-high
+    labels:
+      severity: warning
+    isPaused: false
+  - uid: batch-load-failed
+    title: Batch load failed
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 86400
+        to: 0
+      datasourceUid: wellsdb
+      model:
+        refId: A
+        editorMode: code
+        format: table
+        rawQuery: true
+        rawSql: 'SELECT count(*)::float AS failed_runs FROM core.load_runs
+
+          WHERE status = ''failed'' AND started_at > now() - interval ''24 hours'''
+        intervalMs: 60000
+        maxDataPoints: 43200
+    - refId: B
+      relativeTimeRange:
+        from: 86400
+        to: 0
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: reduce
+        expression: A
+        reducer: last
+        settings:
+          mode: dropNN
+    - refId: C
+      relativeTimeRange:
+        from: 86400
+        to: 0
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+    noDataState: OK
+    execErrState: Error
+    for: 0s
+    annotations:
+      summary: A batch load failed in the last 24 hours
+      description: '{{ printf "%.0f" .Values.B.Value }} failed load run(s). See the Load runs panel and core.load_runs.message.'
+      runbook_url: https://github.com/Djaafar-ar/well-data-platform/blob/main/docs/RUNBOOK.md#batch-load-failed
+    labels:
+      severity: warning
+    isPaused: false

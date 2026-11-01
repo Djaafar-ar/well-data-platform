@@ -20,6 +20,12 @@ jobs:
           --health-cmd "pg_isready -U ci -d wells"
           --health-interval 5s --health-retries 10
 
+    env:
+      PGHOST: localhost
+      PGUSER: ci
+      PGPASSWORD: ci
+      PGDATABASE: wells
+
     steps:
       - uses: actions/checkout@v4
 
@@ -28,59 +34,161 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install -r simulator/requirements.txt -r loader/requirements.txt pytest==8.3.3
+        run: pip install -r simulator/requirements.txt -r loader/requirements.txt pytest==8.3.3 pyyaml==6.0.2
 
       - name: Unit tests
         run: pytest -q
 
-      - name: Apply schema and seed to a real Postgres
-        env:
-          PGPASSWORD: ci
+      - name: Base schema, then migrations (twice, the second run must apply nothing)
         run: |
-          psql -h localhost -U ci -d wells -v ON_ERROR_STOP=1 -f db/init/01_schema.sql
-          psql -h localhost -U ci -d wells -v ON_ERROR_STOP=1 -f db/init/02_seed.sql
-          psql -h localhost -U ci -d wells -v ON_ERROR_STOP=1 -f db/init/04_production.sql
-          psql -h localhost -U ci -d wells -v ON_ERROR_STOP=1 -c "ALTER ROLE ingest_writer PASSWORD 'ci'"
-          psql -h localhost -U ci -d wells -v ON_ERROR_STOP=1 -c "ALTER ROLE batch_loader PASSWORD 'ci'"
+          for f in 01_schema.sql 02_seed.sql 04_production.sql; do psql -v ON_ERROR_STOP=1 -q -f db/init/$f; done
+          psql -c "ALTER ROLE ingest_writer PASSWORD 'ci'" -c "ALTER ROLE batch_loader PASSWORD 'ci'" -c "ALTER ROLE grafana_reader PASSWORD 'ci'"
+          MIGRATIONS_DIR=db/migrations bash db/migrate.sh
+          MIGRATIONS_DIR=db/migrations bash db/migrate.sh | grep -q "migrations applied: 0"
 
-      - name: Run the simulator against it (2 hours of backfill, then stop)
+      - name: Run the simulator (2 hours of backfill, then stop)
         env:
           DATABASE_URL: postgresql://ingest_writer:ci@localhost:5432/wells
         run: |
           cd simulator
           timeout 20 python simulate.py --backfill 2 || [ $? -eq 124 ]
 
-      - name: Check the data landed
-        env:
-          PGPASSWORD: ci
-        run: |
-          n=$(psql -h localhost -U ci -d wells -tAc "SELECT count(*) FROM core.readings")
-          echo "valid readings: $n"
-          test "$n" -gt 1000
-
-      - name: Batch load the sample production file
+      - name: Load all sample files (production + well log), then again
         env:
           DATABASE_URL: postgresql://batch_loader:ci@localhost:5432/wells
         run: |
           cd loader
-          python load_production.py ../tests/fixtures/sample_production.csv
-          python load_production.py ../tests/fixtures/sample_production.csv   # second run must be skipped
+          python load_all.py ../tests/fixtures
+          python load_all.py ../tests/fixtures | tee second_run.log
+          grep -q "succeeded 0, skipped 2, failed 0" second_run.log
 
-      - name: Check the batch load results
-        env:
-          PGPASSWORD: ci
+      - name: Check the data
         run: |
-          q() { psql -h localhost -U ci -d wells -tAc "$1"; }
-          test "$(q "SELECT count(*) FROM core.daily_production")" -eq 1455
-          test "$(q "SELECT count(*) FROM raw.production_rejected")" -eq 6
-          test "$(q "SELECT count(*) FROM core.daily_production WHERE quality_flag IS NOT NULL")" -eq 1
-          test "$(q "SELECT status FROM core.load_runs ORDER BY run_id DESC LIMIT 1")" = "skipped"
-          echo "batch load checks passed"
+          q() { psql -tAc "$1"; }
+          check() { got="$(q "$2")"; if [ "$got" = "$3" ]; then echo "ok    $1 = $got"; else echo "FAIL  $1 = $got (expected $3)"; exit 1; fi; }
+          test "$(q "SELECT count(*) FROM core.readings")" -gt 1000
+          check "production rows"          "SELECT count(*) FROM core.daily_production" 1455
+          check "rejected production rows" "SELECT count(*) FROM raw.production_rejected" 6
+          check "flagged production rows"  "SELECT count(*) FROM core.daily_production WHERE quality_flag IS NOT NULL" 1
+          check "well logs"                "SELECT count(*) FROM core.well_logs" 1
+          check "log samples"              "SELECT count(*) FROM core.log_samples" 3581
+          check "out-of-range log samples" "SELECT sum(n_out_of_range) FROM core.log_curves" 5
+          check "unmapped curves"          "SELECT count(*) FROM core.log_curves WHERE family IS NULL" 1
+          check "catalog entries"          "SELECT count(*) FROM core.data_catalog" 5
+          check "skipped re-runs"          "SELECT count(*) FROM core.load_runs WHERE status = 'skipped'" 2
+
+      - name: Grafana's role can run every dashboard and alert query
+        env:
+          PGUSER: grafana_reader
+        run: |
+          psql -v ON_ERROR_STOP=1 -q -c "SELECT * FROM core.data_catalog" -c "SELECT * FROM core.latest_readings" \
+               -c "SELECT * FROM core.alarms LIMIT 1" -c "SELECT * FROM core.production_kpis LIMIT 1" \
+               -c "SELECT count(*) FROM raw.rejected" -c "SELECT count(*) FROM raw.production_rejected" \
+               -c "SELECT count(*) FROM core.log_samples" > /dev/null
+          if psql -q -c "DELETE FROM core.readings" 2>/dev/null; then echo "grafana_reader must not be able to delete"; exit 1; fi
 
       - name: Practice answers run without errors
+        run: psql -v ON_ERROR_STOP=1 -f sql/practice_answers.sql > /dev/null
+
+      - name: Backup, restore test, and a corrupted backup must be caught
         env:
-          PGPASSWORD: ci
-        run: psql -h localhost -U ci -d wells -v ON_ERROR_STOP=1 -f sql/practice_answers.sql > /dev/null
+          POSTGRES_USER: ci
+          POSTGRES_DB: wells
+          BACKUP_DIR: /tmp/backups
+        run: |
+          # stand-in for "docker compose exec -T db <cmd>": run <cmd> against the CI database
+          mkdir -p /tmp/shim
+          printf '%s\n' '#!/bin/bash' 'a=("$@"); for i in "${!a[@]}"; do [ "${a[$i]}" = db ] && exec "${a[@]:$((i+1))}"; done; exit 2' > /tmp/shim/docker
+          chmod +x /tmp/shim/docker
+          export PATH=/tmp/shim:$PATH
+          bash deploy/backup.sh
+          bash deploy/restore-test.sh
+          f="$(ls -1t /tmp/backups/wells-*.dump | head -1)"
+          printf 'garbage' | dd of="$f" bs=1 seek=5000 conv=notrunc
+          if bash deploy/restore-test.sh; then echo "corrupted backup was NOT detected"; exit 1; fi
+          echo "corrupted backup detected as expected"
+
+  real-data:
+    # Downloads the real public data (Volve + 10 North Sea wells, ~55 MB) and checks the real numbers
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16.4
+        env:
+          POSTGRES_DB: wells
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ci -d wells"
+          --health-interval 5s --health-retries 10
+    env:
+      PGHOST: localhost
+      PGUSER: ci
+      PGPASSWORD: ci
+      PGDATABASE: wells
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r loader/requirements.txt
+      - name: Schema and migrations
+        run: |
+          for f in 01_schema.sql 02_seed.sql 04_production.sql; do psql -v ON_ERROR_STOP=1 -q -f db/init/$f; done
+          psql -c "ALTER ROLE batch_loader PASSWORD 'ci'"
+          MIGRATIONS_DIR=db/migrations bash db/migrate.sh
+      - name: Download the real data (verified)
+        run: python scripts/fetch_public_data.py data north-sea
+      - name: Load it, then again (everything must be skipped)
+        env:
+          DATABASE_URL: postgresql://batch_loader:ci@localhost:5432/wells
+        run: |
+          cd loader
+          python load_all.py ../data
+          python load_all.py ../data | tee second_run.log
+          grep -q "succeeded 0, skipped 13, failed 0" second_run.log
+      - name: Check the real numbers
+        run: |
+          q() { psql -tAc "$1"; }
+          check() { got="$(q "$2")"; if [ "$got" = "$3" ]; then echo "ok    $1 = $got"; else echo "FAIL  $1 = $got (expected $3)"; exit 1; fi; }
+          check "Volve production rows loaded"   "SELECT count(*) FROM core.daily_production" 15630
+          check "Volve negative volumes rejected" "SELECT count(*) FROM raw.production_rejected" 4
+          check "Volve rows flagged (0 hours)"   "SELECT count(*) FROM core.daily_production WHERE quality_flag IS NOT NULL" 34
+          check "Volve oil total (million Sm3)"  "SELECT round((sum(oil_sm3) / 1e6)::numeric, 2) FROM core.daily_production" 10.03
+          check "North Sea wells on the map"     "SELECT count(*) FROM core.wellbores WHERE latitude BETWEEN 57 AND 62 AND longitude BETWEEN 1 AND 5" 10
+          check "barite-affected PEF in 29/6-1"  "SELECT c.n_out_of_range FROM core.log_curves c JOIN core.well_logs l USING (log_id) WHERE l.wellbore = '29/6-1' AND c.mnemonic = 'PEF'" 1454
+          check "dominant rock in 15/9-13"       "SELECT lithology FROM core.lithology_intervals i JOIN core.well_logs l USING (log_id) WHERE l.wellbore = '15/9-13' GROUP BY lithology ORDER BY sum(thickness_m) DESC LIMIT 1" Shale
+          n="$(q "SELECT count(*) FROM core.log_samples")"; echo "log samples: $n"; test "$n" -gt 2000000
+
+  config:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell scripts (shellcheck)
+        run: shellcheck -S warning deploy/*.sh db/migrate.sh db/init/*.sh
+      - name: Compose files, local and both production modes
+        run: |
+          cp .env.example .env
+          docker compose config -q
+          docker compose --profile tools config -q
+          docker compose -f docker-compose.yml -f deploy/docker-compose.prod.yml --profile tunnel config -q
+          DOMAIN=ci.example.com docker compose -f docker-compose.yml -f deploy/docker-compose.prod.yml --profile https config > prod.yml
+          # production must publish nothing except Caddy's 80 and 443
+          python - <<'EOF'
+          import yaml
+          c = yaml.safe_load(open("prod.yml"))["services"]
+          exposed = {s: [p["published"] for p in v.get("ports", [])] for s, v in c.items() if v.get("ports")}
+          assert exposed == {"caddy": ["80", "443"]}, exposed
+          print("only caddy is exposed:", exposed)
+          EOF
+      - name: Grafana dashboards and alert provisioning parse
+        run: |
+          python -c "import json,glob; [json.load(open(f)) for f in glob.glob('grafana/dashboards/*.json')]; print('dashboards ok')"
+          python -c "import yaml,glob; [yaml.safe_load(open(f)) for f in glob.glob('grafana/provisioning/**/*.yml', recursive=True)]; print('provisioning ok')"
+          # '$' in alert templates would be eaten by Grafana's env-var expansion; only ${ALERT_EMAIL} is allowed
+          ! grep -n '\$[a-z]' grafana/provisioning/alerting/*.yml
 
   docker-build:
     runs-on: ubuntu-24.04

@@ -1,0 +1,370 @@
+{
+  "uid": "well-logs",
+  "title": "Well Logs & Data Catalog",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "",
+  "time": {
+    "from": "now-20y",
+    "to": "now"
+  },
+  "timezone": "utc",
+  "tags": [
+    "wells",
+    "logs",
+    "catalog"
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "log",
+        "label": "Log",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "wellsdb"
+        },
+        "query": "SELECT l.log_id AS __value, l.wellbore || '  (' || l.source_name || ')' AS __text FROM core.well_logs l JOIN core.wellbores w USING (wellbore) ORDER BY w.is_synthetic, l.wellbore",
+        "definition": "SELECT l.log_id AS __value, l.wellbore || '  (' || l.source_name || ')' AS __text FROM core.well_logs l JOIN core.wellbores w USING (wellbore) ORDER BY w.is_synthetic, l.wellbore",
+        "multi": false,
+        "includeAll": false,
+        "refresh": 1
+      },
+      {
+        "name": "family",
+        "label": "Curve family",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "wellsdb"
+        },
+        "query": "SELECT DISTINCT family FROM core.log_curves WHERE log_id = $log AND family IS NOT NULL ORDER BY 1",
+        "definition": "SELECT DISTINCT family FROM core.log_curves WHERE log_id = $log AND family IS NOT NULL ORDER BY 1",
+        "multi": false,
+        "includeAll": false,
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "trend",
+      "title": "Gamma ray vs depth (clean sand = low)",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "wellsdb"
+      },
+      "description": "Depth (m) runs left to right. Select a log at the top.",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wellsdb"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT s.depth_m AS depth_m, s.value AS \"Gamma ray\"\nFROM core.log_samples s\nJOIN core.log_curves c USING (log_id, mnemonic)\nWHERE s.log_id = $log AND c.family = 'Gamma ray'\n  AND c.mnemonic = (SELECT mnemonic FROM core.log_curves\n                    WHERE log_id = $log AND family = 'Gamma ray' ORDER BY n_valid DESC LIMIT 1)\nORDER BY s.depth_m"
+        }
+      ],
+      "options": {
+        "xField": "depth_m",
+        "legend": {
+          "showLegend": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": false,
+            "drawStyle": "line"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "trend",
+      "title": "Deep resistivity vs depth (hydrocarbons = high, log scale)",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "wellsdb"
+      },
+      "description": "Depth (m) runs left to right. Select a log at the top.",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wellsdb"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT s.depth_m AS depth_m, s.value AS \"Deep resistivity\"\nFROM core.log_samples s\nJOIN core.log_curves c USING (log_id, mnemonic)\nWHERE s.log_id = $log AND c.family = 'Deep resistivity'\n  AND c.mnemonic = (SELECT mnemonic FROM core.log_curves\n                    WHERE log_id = $log AND family = 'Deep resistivity' ORDER BY n_valid DESC LIMIT 1)\nORDER BY s.depth_m"
+        }
+      ],
+      "options": {
+        "xField": "depth_m",
+        "legend": {
+          "showLegend": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": false,
+            "drawStyle": "line",
+            "scaleDistribution": {
+              "type": "log",
+              "log": 10
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "trend",
+      "title": "Any curve family: $family",
+      "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "wellsdb"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wellsdb"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT s.depth_m AS depth_m, s.value AS \"$family\"\nFROM core.log_samples s\nJOIN core.log_curves c USING (log_id, mnemonic)\nWHERE s.log_id = $log AND c.family = '$family'\n  AND c.mnemonic = (SELECT mnemonic FROM core.log_curves\n                    WHERE log_id = $log AND family = '$family' ORDER BY n_valid DESC LIMIT 1)\nORDER BY s.depth_m"
+        }
+      ],
+      "options": {
+        "xField": "depth_m",
+        "legend": {
+          "showLegend": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "Curves in this log (catalog + quality)",
+      "gridPos": {
+        "x": 0,
+        "y": 17,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "wellsdb"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wellsdb"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT mnemonic, unit, COALESCE(family, 'UNMAPPED') AS family, description,\n       n_valid, n_null, n_out_of_range,\n       round(min_value::numeric, 3) AS min, round(max_value::numeric, 3) AS max, round(mean_value::numeric, 3) AS mean\nFROM core.log_curves\nWHERE log_id = $log\nORDER BY family NULLS LAST, mnemonic"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "family"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "UNMAPPED": {
+                        "color": "orange",
+                        "index": 0
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "n_out_of_range"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "transparent",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 1
+                    },
+                    {
+                      "color": "red",
+                      "value": 100
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "Data catalog: what we have, for which well, from where",
+      "gridPos": {
+        "x": 0,
+        "y": 25,
+        "w": 24,
+        "h": 10
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "wellsdb"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wellsdb"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT kind, wellbore, field, CASE WHEN is_synthetic THEN 'synthetic' ELSE 'real' END AS data,\n       covers_from, covers_to, records, sources, licences\nFROM core.data_catalog\nORDER BY is_synthetic, kind, wellbore"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Wellbore aliases (same well, different names)",
+      "gridPos": {
+        "x": 0,
+        "y": 35,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "wellsdb"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wellsdb"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT wellbore, alias, source FROM core.wellbore_aliases ORDER BY wellbore, alias"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "Unmapped mnemonics (data steward to-do)",
+      "gridPos": {
+        "x": 12,
+        "y": 35,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "wellsdb"
+      },
+      "description": "Curves whose mnemonic is not in core.curve_families. Add a row there to map them.",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wellsdb"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "SELECT c.mnemonic, c.unit, c.description, l.wellbore, l.source_name\nFROM core.log_curves c\nJOIN core.well_logs l USING (log_id)\nWHERE c.family IS NULL\nORDER BY c.mnemonic"
+        }
+      ]
+    }
+  ]
+}

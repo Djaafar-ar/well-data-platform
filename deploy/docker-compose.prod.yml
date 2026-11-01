@@ -1,0 +1,70 @@
+# Production override. Use it on the server together with the main file:
+#
+#   docker compose -f docker-compose.yml -f deploy/docker-compose.prod.yml --profile https up -d
+#
+# Differences from the local setup:
+#   - the database and Grafana publish NO ports: they are reachable only inside Docker's network
+#   - exactly one door faces the internet: Caddy (HTTPS on 443, 80 only to redirect to HTTPS),
+#     or, with --profile tunnel, no open port at all (outbound Cloudflare tunnel)
+#   - container logs are rotated so they cannot fill the disk
+#   - Grafana cookies are HTTPS-only, sign-up and anonymous access are off
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  db:
+    <<: *logging
+    ports: !reset []
+
+  simulator:
+    <<: *logging
+
+  grafana:
+    <<: *logging
+    ports: !reset []
+    environment:
+      GF_SERVER_ROOT_URL: ${PUBLIC_URL:-https://${DOMAIN:-localhost}/}
+      GF_SECURITY_COOKIE_SECURE: "true"
+      GF_SECURITY_COOKIE_SAMESITE: strict
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+
+  # Option A: public server with a domain name -> automatic HTTPS certificates (Let's Encrypt)
+  caddy:
+    <<: *logging
+    image: caddy:2.8.4
+    profiles: ["https"]
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:-}            # required for this option, e.g. 20-30-40-50.sslip.io
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data            # certificates: keep them, or Let's Encrypt rate limits bite
+      - caddy-config:/config
+    depends_on:
+      - grafana
+
+  # Option B: no public IP / no open ports (e.g. a VM on your own PC) -> outbound Cloudflare tunnel.
+  # The public https://....trycloudflare.com address is printed in:  docker compose logs tunnel
+  tunnel:
+    <<: *logging
+    image: cloudflare/cloudflared:2024.10.1
+    profiles: ["tunnel"]
+    restart: unless-stopped
+    command: ["tunnel", "--no-autoupdate", "--url", "http://grafana:3000"]
+    depends_on:
+      - grafana
+
+volumes:
+  caddy-data:
+  caddy-config:

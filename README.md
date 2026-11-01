@@ -1,125 +1,90 @@
-# Well Data Platform
+# Agent de surveillance des puits
 
-An end-to-end data and infrastructure platform for oil-well telemetry: SCADA-style data is
-ingested, validated, stored in PostgreSQL, monitored in Grafana, and (in later milestones)
-deployed on a cloud Linux server with automated backups and CI/CD.
+Prototype d'un agent qui surveille des puits pétroliers jour et nuit : il lit les données de télémétrie, détecte les anomalies, trouve la cause probable, prévient l'astreinte par SMS et envoie les rapports par e-mail.
 
-It is built around one question operations teams ask every day: **can we trust the well data
-we are looking at, and will we know quickly when something goes wrong?**
+> **Prototype indépendant.** Toutes les données sont fictives. Il n'y a aucune connexion à un SCADA ou à un équipement réel. L'agent est conçu pour rester en **lecture seule** : il ne commande aucune vanne et ne remplace ni les alarmes SCADA ni les systèmes de sécurité.
 
-> Telemetry is simulated: wells, values and limits are fictional. The batch loader is built for the
-> public Equinor Volve production dataset (not included in this repo; see below).
+**[Ouvrir la démonstration en ligne](https://VOTRE-NOM.github.io/agent-surveillance-puits/)**, puis appuyer sur « Lancer la démo guidée » (environ une minute).
 
-![Well Overview dashboard](docs/dashboard.png)
+<!-- Ajoutez vos captures d'écran dans docs/img/, puis retirez les marques de commentaire :
+![Vue temps réel](docs/img/temps-reel.png)
+![Performance des alarmes](docs/img/performance-alarmes.png)
+-->
 
-## Architecture
+## Pourquoi
+
+La nuit, un puits qui s'arrête, une RTU qui perd la radio ou une pression annulaire qui monte peuvent n'être vus que le matin. La télémétrie par radio arrive déjà au SCADA : l'agent la surveille en continu, l'analyse comme le ferait un ingénieur de production, et ne réveille que la bonne personne.
+
+## Ce que montre la démonstration
+
+- **12 puits, 3 manifolds, 3 répéteurs radio**, avec trois types de puits : gas lift, éruptifs, éruptifs avec eau de dessalage.
+- **16 types d'incidents** : chute ou hausse de pression, arrêt du gas lift ou de l'eau de dessalage, pression annulaire, instabilité, capteur défaillant, batterie faible, perte radio, vanne de sécurité fermée, détection feu, intrusion, défaut de carte E/S, panne de répéteur, panne du réseau gas lift, restriction de collecte.
+- **Regroupement cause et conséquence** : quatre puits muets en même temps donnent un seul SMS « répéteur en panne », pas quatre.
+- **Escalade par SMS** avec acquittement (« OK »), sur une liste d'astreinte configurable. Un signal feu prévient tout le monde en même temps.
+- **Déclin de pression sur un an** : retire les fermetures, lavages et changements de duse, compare 7, 30, 60 jours et un an, distingue un déclin de zone d'un déclin propre au puits, repère une dérive de capteur, estime quand le puits ne débitera plus.
+- **Production différée** en m³ et en dollars, comptée minute par minute.
+- **Performance du système d'alarmes** comparée aux références EEMUA 191 et ISA 18.2 : taux d'alarmes, pics, inondations, alarmes persistantes et bavardes, avec et sans l'agent.
+- **Rapports** : journalier, relève de quart, déclin, bilan des alarmes.
+
+L'analyse rédigée par un modèle d'IA n'est active que lorsque la page est ouverte dans Claude. Sur GitHub, toute l'analyse vient de règles fixes.
+
+## Principes de conception
+
+1. **Lecture seule.** L'agent lit le SCADA ou son historique. Il ne parle jamais directement aux RTU et n'envoie aucune commande.
+2. **Les alarmes viennent de règles fixes**, prévisibles et vérifiables. L'IA, quand elle est utilisée, sert à expliquer et à rédiger, jamais à décider d'une urgence.
+3. **Une alarme, une cause.** Les alarmes secondaires sont rattachées à la cause déjà signalée (suppression par conception, ISA 18.2).
+4. **Les données restent en local** : serveur sur site, passerelle SMS par modem GSM.
+5. **L'humain garde la main** sur toute manœuvre.
+
+## Architecture visée
 
 ```mermaid
 flowchart LR
-    S[SCADA / RTU simulator<br/>Python] -->|readings every 10 s| V{Validation<br/>rules}
-    V -->|valid| R[(core.readings<br/>PostgreSQL)]
-    V -->|invalid + reason| X[(raw.rejected)]
-    R --> G[Grafana<br/>dashboards & alarms]
-    X --> G
-    F[Daily production file<br/>Excel / CSV] --> L{Batch loader<br/>validate, dedupe}
-    L -->|clean + flagged| P[(core.daily_production)]
-    L -->|rejected + original row| PR[(raw.production_rejected)]
-    L -->|audit| LR[(core.load_runs)]
-    P --> G
-    PR --> G
-    LR --> G
+  RTU["RTU des puits"] -- radio --> SCADA["SCADA / historien"]
+  SCADA -- "lecture seule" --> AG["Serveur de l'agent (niveau 3.5)"]
+  AG --> REG["Règles d'alarme"]
+  REG --> ANA["Analyse et regroupement"]
+  ANA --> SMS["SMS d'astreinte (modem GSM)"]
+  ANA --> MAIL["E-mails et rapports"]
 ```
 
-| Component | What it does |
-|---|---|
-| `simulator/` | Produces readings for 3 wells and 5 tags (WHP, WHT, FLP, choke, gas-lift rate) with drift, a daily cycle and noise. Injects real-world data faults (spikes, NaN, negative pressure, unknown tags) and operational events (pressure build-up, gas-lift supply loss). |
-| `simulator/validation.py` | Rejects readings that are physically impossible, malformed or from unknown wells or tags. Rejected readings are stored with a reason and never silently dropped. |
-| `db/init/` | Schema: well master data, a sensor catalog with physical and operating limits, the time-series table, a quarantine table, views for data freshness and alarms. |
-| `loader/` | Batch job that loads daily production files (Volve "Daily Production Data" format, Excel or CSV). Every row is loaded, flagged or rejected with a reason and its source line. Re-running the same file is a no-op (file fingerprint + upsert). Every run is recorded in `core.load_runs`. |
-| `grafana/` | Provisioned data source and dashboard: trends, data freshness, alarms, rejection rate and reasons. |
-| `.github/workflows/ci.yml` | Unit tests, schema applied to a real PostgreSQL, a simulator run, data checks and a Docker build on every push. |
+La connexion se ferait côté lecture seule, dans une zone intermédiaire entre le réseau bureautique et le réseau de contrôle, selon le modèle Purdue et l'approche par zones et conduits de l'IEC 62443.
 
-### Design decisions
+## Passerelle SMS pour la démonstration
 
-- **Two kinds of limits per sensor.** *Physical* limits separate bad data from real data. *Operating* limits raise alarms. A wellhead pressure of 4,750 bar is a broken sensor; 195 bar is a real alarm.
-- **Quarantine, don't delete.** Invalid readings go to `raw.rejected` with the reason, so data-quality problems can be measured and traced back to their source.
-- **Least privilege.** The simulator's database role can only insert telemetry. Grafana's role can only read. Neither can delete or change anything.
-- **Network exposure.** Ports are bound to `127.0.0.1`, so the database and Grafana are not reachable from the network.
-- **No secrets in Git.** All passwords come from `.env`, which is ignored by Git.
-- **Three outcomes per production row: loaded, flagged, rejected.** Impossible values (negative volumes, a choke above 100 %) are rejected. Possible but suspicious values (oil reported with 0 hours on stream) are kept and flagged for a human, because deleting them would hide a real reporting problem.
-- **Idempotent batch loads.** The file's SHA-256 fingerprint is recorded; loading the same file twice does nothing, and `--force` re-loads it safely with an upsert, so a retried job never duplicates data.
-- **Lineage.** Every production row points to the load run that wrote it, and every rejected row keeps its original values and source line number.
-- **BRIN index on time.** Telemetry arrives in time order, so a BRIN index gives fast time-range queries at a fraction of a B-tree's size.
+`passerelle-sms.py` sert la page en local et transmet les SMS d'urgence à un téléphone Android qui fait office de passerelle (application « SMS Gateway for Android », mode Local Server). Aucune bibliothèque à installer.
 
-## Quick start
-
-Requirements: [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Windows, macOS) or Docker Engine (Linux).
-
-```bash
-git clone https://github.com/Djaafar-ar/well-data-platform.git
-cd well-data-platform
-cp .env.example .env          # Windows PowerShell: copy .env.example .env
-# edit .env and change every password
-docker compose up -d --build
+```
+python passerelle-sms.py --test
+python passerelle-sms.py --phone 192.168.1.25 --user LOGIN --password MOTDEPASSE
 ```
 
-Open http://localhost:3000, log in as `admin` with the password from `.env`, then open **Wells → Well Overview**.
-The simulator first writes 6 hours of history, then sends live data every 10 seconds.
+Puis ouvrir `http://localhost:8787`, et dans l'onglet Paramètres cocher l'envoi de vrais SMS. Un téléphone personnel n'est adapté qu'à une démonstration : un système réel utiliserait un modem GSM dédié.
 
-Useful commands:
+## Feuille de route
 
-```bash
-docker compose ps                                   # is everything running?
-docker compose logs -f simulator                    # watch readings arrive
-docker compose exec db psql -U wells_admin -d wells # SQL shell
-docker compose stop simulator                       # simulate a communication loss
-docker compose down                                 # stop (data is kept)
-docker compose down -v                              # stop and delete all data
-```
+1. **Pilote de 3 mois sur 5 puits**, en parallèle du système actuel, avec accès en lecture seule (OPC UA ou base de données).
+2. Stockage de l'historique dans une base de séries temporelles.
+3. Seuils définis avec les ingénieurs de production, puis mesure des fausses alarmes.
+4. Modem GSM dédié et compte e-mail de service.
+5. Analyse par IA locale ou approuvée, pour les explications et les rapports.
 
-## Loading production data
+## Limites
 
-Try it with the synthetic sample (fictional wells, Volve column format, with deliberate errors):
+- Les données sont simulées ; la scrutation radio est simplifiée à une mesure par minute.
+- Les seuils et les valeurs de MAASP sont des exemples, à fixer avec les équipes du site.
+- Ce n'est pas un système de sécurité et il n'est pas certifié.
 
-```bash
-docker compose run --rm loader /fixtures/sample_production.csv
-```
+## Références
 
-Expected: `1461 rows read, 1455 loaded (1 flagged), 6 rejected`, with one line per rejection reason.
-Run it again: it is skipped, because that exact file was already loaded.
-Then open **Wells → Field Production** in Grafana.
+EEMUA 191 et ISA-18.2 (gestion des alarmes), API RP 90 (pression annulaire, MAASP), modèle Purdue et IEC 62443 (cybersécurité industrielle).
 
-With the real Volve data: Equinor publishes the Volve field dataset under the Equinor Open Data Licence
-(see [Volve data sharing](https://www.equinor.com/en/energy/volve-data-sharing)). Put the production
-workbook in `data/` (ignored by Git, so the data is never committed) and run:
+## Licence
 
-```bash
-docker compose run --rm loader "/data/Volve production data.xlsx"
-```
+MIT, voir [LICENSE](LICENSE). Auteur : [Votre nom].
 
-The loader picks the daily sheet automatically. Use `--sheet "<name>"` to choose another one.
+---
 
-## SQL practice
+## English summary
 
-`sql/practice.sql` has seven exercises on this data, from simple aggregates to window functions
-and "gaps and islands". Answers are in `sql/practice_answers.sql`.
-
-## Tests
-
-```bash
-pip install -r simulator/requirements.txt pytest
-pytest -q
-```
-
-## Roadmap
-
-- [x] **M1 – Local stack:** simulator, validation, PostgreSQL schema, Grafana dashboard, CI
-- [x] **M2 – Batch ingestion:** production files (Volve format) with validation, flags, rejects, lineage and idempotent reloads
-- [ ] **M3 – Well logs and catalog:** ingest LAS well logs; metadata catalog (well, source, units, lineage)
-- [ ] **M4 – Alerting:** Grafana alert rules and email notifications; data-freshness alerts
-- [ ] **M5 – Cloud deployment:** Linux VM on Azure, firewall rules, HTTPS reverse proxy, nightly backups with a tested restore
-- [ ] **M6 – Automation:** deploy from GitHub Actions; runbook for operations
-
-## License
-
-MIT
+A prototype **well surveillance agent** for oil fields with radio telemetry. It watches wells 24/7, detects anomalies, groups related alarms under their root cause, sends SMS escalations to the on-call roster, forecasts long-term pressure decline, tracks deferred production, and benchmarks its alarm load against EEMUA 191 / ISA-18.2. Everything runs on simulated data in a single HTML file (no build step). The design is strictly read-only: it never commands equipment. Open the live demo and press "Lancer la démo guidée".

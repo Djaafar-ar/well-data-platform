@@ -1,0 +1,63 @@
+name: Deploy
+
+# Runs after the CI workflow finishes on main. Deploys only if CI passed, and deploys exactly the
+# commit CI tested (not whatever main points to by then). Does nothing until the server secrets exist.
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:          # manual "Run workflow" button, deploys the selected commit
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false   # never interrupt a deploy halfway
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    environment: production
+    env:
+      COMMIT: ${{ github.event.workflow_run.head_sha || github.sha }}
+    steps:
+      - name: Is a server configured?
+        id: cfg
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          if [ -z "$DEPLOY_HOST" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No DEPLOY_HOST secret: deployment skipped. See docs/RUNBOOK.md#automatic-deployment"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up SSH with a pinned host key
+        if: steps.cfg.outputs.configured == 'true'
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          # Pinned host key: if the server's identity ever changes, the deploy refuses to connect
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      - name: Deploy commit ${{ env.COMMIT }}
+        if: steps.cfg.outputs.configured == 'true'
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          PROFILE: ${{ vars.DEPLOY_PROFILE || 'https' }}
+        run: |
+          ssh -i ~/.ssh/id_deploy -o StrictHostKeyChecking=yes -o ConnectTimeout=20 "$USER@$HOST" \
+            "set -e; cd /opt/well-data-platform && git fetch --quiet origin && git reset --hard $COMMIT && DEPLOY_PROFILE=$PROFILE bash deploy/remote-deploy.sh"
+
+      - name: Clean up the key
+        if: always() && steps.cfg.outputs.configured == 'true'
+        run: rm -f ~/.ssh/id_deploy

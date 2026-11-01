@@ -1,5 +1,9 @@
 name: well-data-platform
 
+# Long-running services: db, simulator, grafana   ->  docker compose up -d
+# One-off jobs (profile "tools"): migrate, fetch, load-all, loader, log-loader
+#                                                 ->  docker compose run --rm <job>
+
 services:
   db:
     image: postgres:16.4
@@ -13,7 +17,9 @@ services:
       LOADER_PASSWORD: ${LOADER_PASSWORD}
     volumes:
       - db-data:/var/lib/postgresql/data          # data survives container restarts
-      - ./db/init:/docker-entrypoint-initdb.d:ro  # schema + seed, run on first start only
+      - ./db/init:/docker-entrypoint-initdb.d:ro  # base schema, run on first start only
+      - ./db/migrations:/migrations:ro            # later schema changes, applied in order
+      - ./db/migrate.sh:/migrate.sh:ro
     ports:
       - "127.0.0.1:5432:5432"                     # reachable from your PC only, not the network
     healthcheck:
@@ -32,26 +38,22 @@ services:
       db:
         condition: service_healthy
 
-  # One-off batch job, not a running service: started only with `docker compose run --rm loader <file>`
-  loader:
-    build: ./loader
-    profiles: ["tools"]
-    environment:
-      DATABASE_URL: postgresql://batch_loader:${LOADER_PASSWORD}@db:5432/wells
-    volumes:
-      - ./data:/data:ro                 # put real files here (ignored by Git)
-      - ./tests/fixtures:/fixtures:ro   # synthetic sample, safe to commit
-    depends_on:
-      db:
-        condition: service_healthy
-
   grafana:
     image: grafana/grafana-oss:11.3.0
     restart: unless-stopped
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
       GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD}
+      # Alert emails (milestone 4). Without SMTP settings, alerts still show under Alerting in Grafana.
+      ALERT_EMAIL: ${ALERT_EMAIL:-oncall@example.com}
+      GF_SMTP_ENABLED: ${SMTP_ENABLED:-false}
+      GF_SMTP_HOST: ${SMTP_HOST:-}
+      GF_SMTP_USER: ${SMTP_USER:-}
+      GF_SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      GF_SMTP_FROM_ADDRESS: ${SMTP_FROM:-grafana@example.com}
+      GF_SMTP_FROM_NAME: Well Data Platform
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
@@ -61,6 +63,70 @@ services:
     depends_on:
       db:
         condition: service_healthy
+
+  # ---- one-off jobs -------------------------------------------------------------------------
+
+  # Apply new schema migrations to an existing database (safe to run any time)
+  migrate:
+    image: postgres:16.4
+    profiles: ["tools"]
+    entrypoint: ["bash", "/migrate.sh"]
+    environment:
+      PGHOST: db
+      PGDATABASE: wells
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./db/migrations:/migrations:ro
+      - ./db/migrate.sh:/migrate.sh:ro
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # Download real public datasets into ./data (verified, never committed to Git). Sets:
+  #   docker compose run --rm fetch                 core: Volve + 2 logs (~5 MB)
+  #   docker compose run --rm fetch north-sea       + 10 FORCE 2020 North Sea wells (~55 MB)
+  #   docker compose run --rm fetch north-sea-all   + 108 more wells, 118 in total (~620 MB)
+  fetch:
+    image: python:3.12-slim
+    profiles: ["tools"]
+    entrypoint: ["python", "/scripts/fetch_public_data.py", "/data"]
+    command: ["core"]
+    volumes:
+      - ./data:/data
+      - ./scripts:/scripts:ro
+
+  # Load every file in the sample folder and ./data; already-loaded files are skipped
+  load-all:
+    build: ./loader
+    profiles: ["tools"]
+    entrypoint: ["python", "load_all.py", "/fixtures", "/data"]
+    environment: &loader-env
+      DATABASE_URL: postgresql://batch_loader:${LOADER_PASSWORD}@db:5432/wells
+    volumes: &loader-volumes
+      - ./data:/data:ro                 # real files (ignored by Git)
+      - ./tests/fixtures:/fixtures:ro   # synthetic samples, safe to commit
+    depends_on: &loader-depends
+      db:
+        condition: service_healthy
+
+  # Load one production file:  docker compose run --rm loader /fixtures/sample_production.csv
+  loader:
+    build: ./loader
+    profiles: ["tools"]
+    entrypoint: ["python", "load_production.py"]
+    environment: *loader-env
+    volumes: *loader-volumes
+    depends_on: *loader-depends
+
+  # Load one LAS well log:  docker compose run --rm log-loader /fixtures/DEMO-A1_logs.las
+  log-loader:
+    build: ./loader
+    profiles: ["tools"]
+    entrypoint: ["python", "load_las.py"]
+    environment: *loader-env
+    volumes: *loader-volumes
+    depends_on: *loader-depends
 
 volumes:
   db-data:
