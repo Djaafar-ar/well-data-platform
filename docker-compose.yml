@@ -10,6 +10,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       INGEST_PASSWORD: ${INGEST_PASSWORD}
       GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD}
+      LOADER_PASSWORD: ${LOADER_PASSWORD}
     volumes:
       - db-data:/var/lib/postgresql/data          # data survives container restarts
       - ./db/init:/docker-entrypoint-initdb.d:ro  # schema + seed, run on first start only
@@ -27,6 +28,19 @@ services:
       DATABASE_URL: postgresql://ingest_writer:${INGEST_PASSWORD}@db:5432/wells
       INTERVAL_SECONDS: ${INTERVAL_SECONDS:-10}
       FAULT_RATE: ${FAULT_RATE:-0.02}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # One-off batch job, not a running service: started only with `docker compose run --rm loader <file>`
+  loader:
+    build: ./loader
+    profiles: ["tools"]
+    environment:
+      DATABASE_URL: postgresql://batch_loader:${LOADER_PASSWORD}@db:5432/wells
+    volumes:
+      - ./data:/data:ro                 # put real files here (ignored by Git)
+      - ./tests/fixtures:/fixtures:ro   # synthetic sample, safe to commit
     depends_on:
       db:
         condition: service_healthy

@@ -272,7 +272,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "SELECT regexp_replace(reason, '-?[0-9][0-9.e+-]*', 'N', 'g') AS reason, count(*) AS readings\nFROM raw.rejected\nWHERE $__timeFilter(time)\nGROUP BY 1\nORDER BY 2 DESC"
+          "rawSql": "SELECT regexp_replace(reason, '(?<![A-Za-z_])-?[0-9][0-9.e+-]*', 'N', 'g') AS reason, count(*) AS readings\nFROM raw.rejected\nWHERE $__timeFilter(time)\nGROUP BY 1\nORDER BY 2 DESC"
         }
       ]
     }

@@ -28,7 +28,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install -r simulator/requirements.txt pytest==8.3.3
+        run: pip install -r simulator/requirements.txt -r loader/requirements.txt pytest==8.3.3
 
       - name: Unit tests
         run: pytest -q
@@ -39,7 +39,9 @@ jobs:
         run: |
           psql -h localhost -U ci -d wells -v ON_ERROR_STOP=1 -f db/init/01_schema.sql
           psql -h localhost -U ci -d wells -v ON_ERROR_STOP=1 -f db/init/02_seed.sql
+          psql -h localhost -U ci -d wells -v ON_ERROR_STOP=1 -f db/init/04_production.sql
           psql -h localhost -U ci -d wells -v ON_ERROR_STOP=1 -c "ALTER ROLE ingest_writer PASSWORD 'ci'"
+          psql -h localhost -U ci -d wells -v ON_ERROR_STOP=1 -c "ALTER ROLE batch_loader PASSWORD 'ci'"
 
       - name: Run the simulator against it (2 hours of backfill, then stop)
         env:
@@ -56,6 +58,25 @@ jobs:
           echo "valid readings: $n"
           test "$n" -gt 1000
 
+      - name: Batch load the sample production file
+        env:
+          DATABASE_URL: postgresql://batch_loader:ci@localhost:5432/wells
+        run: |
+          cd loader
+          python load_production.py ../tests/fixtures/sample_production.csv
+          python load_production.py ../tests/fixtures/sample_production.csv   # second run must be skipped
+
+      - name: Check the batch load results
+        env:
+          PGPASSWORD: ci
+        run: |
+          q() { psql -h localhost -U ci -d wells -tAc "$1"; }
+          test "$(q "SELECT count(*) FROM core.daily_production")" -eq 1455
+          test "$(q "SELECT count(*) FROM raw.production_rejected")" -eq 6
+          test "$(q "SELECT count(*) FROM core.daily_production WHERE quality_flag IS NOT NULL")" -eq 1
+          test "$(q "SELECT status FROM core.load_runs ORDER BY run_id DESC LIMIT 1")" = "skipped"
+          echo "batch load checks passed"
+
       - name: Practice answers run without errors
         env:
           PGPASSWORD: ci
@@ -67,3 +88,5 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build the simulator image
         run: docker build -t well-simulator ./simulator
+      - name: Build the loader image
+        run: docker build -t well-loader ./loader

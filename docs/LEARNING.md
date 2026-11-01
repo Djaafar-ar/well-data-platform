@@ -39,3 +39,23 @@ until you can.
 - [ ] Stop the simulator for 6 minutes and watch the freshness table turn red. Explain why.
 
 When all of this is done, milestone 1 is yours, not mine.
+
+---
+
+# Milestone 2: batch loading
+
+## Questions
+
+15. What are the three outcomes a production row can have, and why is "flagged" different from "rejected"? Give one example of each from the sample file.
+16. What does the loader do if you run it twice on the same file? Which two mechanisms make that safe?
+17. Why does a rejected row keep the original values and the source line number?
+18. What is `core.load_runs` for? What question can it answer six months later?
+19. Why can the `batch_loader` role not read `raw.production_rejected`? What did we change in the code because of that?
+20. What is water cut, and why does it rise over a well's life?
+
+## Hands-on tasks (no AI)
+
+- [ ] Run the loader on the sample, then run it again and explain the second result.
+- [ ] Open `tests/fixtures/sample_production.csv` in Excel, break one more row yourself (for example, a negative gas volume), save it under a new name in `data/`, load it, and find your row in the rejects panel.
+- [ ] Find the rule that rejects a wellhead temperature (`AVG_WHT_P`) above 200 °C. Which file and which line? Prove it works by adding a test in `tests/test_production_rules.py`.
+- [ ] Write a SQL query: total oil per wellbore per month for 2015.
