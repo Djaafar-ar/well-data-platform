@@ -1,6 +1,6 @@
 # Deploying to a Linux server
 
-The same scripts work on any **Ubuntu 24.04** machine. Pick where it runs:
+The same scripts work on any **Ubuntu 24.04 or newer** machine (tested on 26.04). Pick where it runs:
 
 | Option | Cost | Needs | Public URL |
 |---|---|---|---|
@@ -76,13 +76,20 @@ On the server: `sudo ufw status verbose`, `sudo fail2ban-client status sshd`.
    (2 vCPU, 4 GB RAM, 25 GB disk). During installation tick **Install OpenSSH server**.
 2. In VirtualBox → VM Settings → Network: **Bridged Adapter**, so the VM gets an address on your
    home network (e.g. `192.168.1.50`). From Windows: `ssh <your-user>@192.168.1.50`.
-3. Run steps 2 and 3 of option A, but **without DOMAIN**, and start with the tunnel profile:
+3. Run step 2 of option A (`provision.sh`). It copies the SSH key you logged in with to the
+   `deploy` user, then switches SSH to key-only login.
+4. As `deploy`, start everything with one script. It creates `.env` with random passwords,
+   starts the services with the tunnel profile and prints the public address:
    ```bash
-   docker compose -f docker-compose.yml -f deploy/docker-compose.prod.yml --profile tunnel up -d --build
-   docker compose -f docker-compose.yml -f deploy/docker-compose.prod.yml logs tunnel | grep trycloudflare
+   ssh deploy@192.168.1.50 "bash /opt/well-data-platform/deploy/first-start.sh"
    ```
-   The log shows a public `https://<random-words>.trycloudflare.com` address. Open it from your phone
+   It ends with `Public URL: https://<random-words>.trycloudflare.com`. Open it from your phone
    on mobile data: your Grafana, over HTTPS, while the VM accepts **no** inbound connection from the internet.
+5. Load the real data and prove the backups restore:
+   ```bash
+   ssh deploy@192.168.1.50 "bash /opt/well-data-platform/deploy/load-data.sh"
+   ```
+   Downloads retry and resume on a bad connection; re-running skips what is already done.
 
 Limits to know (and to mention in an interview): a quick tunnel's address changes on every restart
 and has no uptime guarantee. A permanent one needs a free Cloudflare account and a domain name
